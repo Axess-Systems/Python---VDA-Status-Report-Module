@@ -108,11 +108,21 @@ def create_report(data):
     return report
 
 def send_email(subject, body, recipients):
-    smtp_server = os.getenv('SMTP_SERVER')
-    smtp_port = int(os.getenv('SMTP_PORT'))
-    smtp_username = os.getenv('SMTP_USERNAME')
+    # Validate email configuration
+    required_email_vars = ['SMTP_SERVER', 'SMTP_PORT', 'SMTP_USERNAME', 'SMTP_PASSWORD']
+    missing_vars = [var for var in required_email_vars if not os.getenv(var)]
+    if missing_vars:
+        raise ValueError(f"Missing required email configuration variables: {missing_vars}")
+    
+    smtp_server = os.getenv('SMTP_SERVER')  # mail.privateemail.com
+    smtp_port = int(os.getenv('SMTP_PORT'))  # 587
+    smtp_username = os.getenv('SMTP_USERNAME')  # no-reply@codeneko.co
     smtp_password = os.getenv('SMTP_PASSWORD')
-    use_tls = os.getenv('USE_TLS', 'False').lower() == 'true'
+    use_tls = os.getenv('SMTP_USE_TLS', 'true').lower() == 'true'  # Changed to match your env var
+    use_ssl = os.getenv('SMTP_USE_SSL', 'false').lower() == 'true'  # Added to match your env var
+
+    if not recipients:
+        raise ValueError("No recipients specified for email")
 
     msg = MIMEMultipart()
     msg['From'] = smtp_username
@@ -121,11 +131,68 @@ def send_email(subject, body, recipients):
 
     msg.attach(MIMEText(body, 'html'))
 
-    with smtplib.SMTP(smtp_server, smtp_port) as server:
-        if use_tls:
-            server.starttls()
+    try:
+        logging.info(f"Connecting to SMTP server {smtp_server}:{smtp_port}")
+        
+        if use_ssl:
+            server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=30)
+        else:
+            server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)
+            if use_tls:
+                logging.info("Enabling TLS encryption")
+                server.starttls()
+        
+        logging.info("Attempting SMTP authentication")
         server.login(smtp_username, smtp_password)
+        
+        logging.info(f"Sending email to {', '.join(recipients)}")
         server.send_message(msg)
+        
+        server.quit()
+        logging.info("Email sent successfully")
+        
+    except Exception as e:
+        logging.error(f"Failed to send email: {str(e)}")
+        raise
+
+def vda_status_task():
+    logging.info(f"Starting VDA status task")
+    
+    data = {}
+    for customer_id, details in customers.items():
+        try:
+            logging.info(f"Processing customer: {details['customer_name']} ({customer_id})")
+            token = get_bearer_token(customer_id, details['client_id'], details['client_secret'])
+            data[customer_id] = get_vda_status(token, customer_id, details['site_id'])
+        except Exception as e:
+            logging.error(f"Failed to get VDA status for {customer_id}: {str(e)}")
+            continue
+
+    if not data:
+        logging.error("No VDA status data collected for any customer")
+        return
+
+    try:
+        report = create_report(data)
+        
+        # Save the report to a text file
+        with open('vda_status_report.html', 'w') as file:
+            file.write(report)
+            logging.info("Report saved to vda_status_report.html")
+
+        # Set default recipient
+        default_recipient = "sstickley@axesssystems.co.uk"
+        recipients = os.getenv('EMAIL_RECIPIENTS', default_recipient).split(',')
+        recipients = [r.strip() for r in recipients if r.strip()]  # Clean up recipient list
+            
+        subject = "VDA Status Report"
+        send_email(subject, report, recipients)
+        logging.info("VDA status task completed successfully")
+        
+    except Exception as e:
+        logging.error(f"Failed to complete VDA status task: {str(e)}")
+        raise
+        
 
 def get_bearer_token(customer_id, client_id, client_secret):
     url = f"https://api.cloud.com/cctrustoauth2/{customer_id}/tokens/clients"
